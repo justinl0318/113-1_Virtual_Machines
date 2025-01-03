@@ -1,0 +1,78 @@
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index fe102cd2e..9d36b36cc 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -755,6 +755,53 @@ static bool kvm_vcpu_exit_request(struct kvm_vcpu *vcpu, int *ret)
+ 			xfer_to_guest_mode_work_pending();
+ }
+ 
++/*
++ * Modify the guest VM's Program Counter (PC) if the GPRs match the expected value
++ */
++
++void modify_pc(struct kvm_cpu_context *ctxt)
++{
++	u64 x0 = ctxt->regs.regs[0];
++	u64 x1 = ctxt->regs.regs[1];
++	u64 x2 = ctxt->regs.regs[2];
++	u64 x3 = ctxt->regs.regs[3];
++	u64 x4 = ctxt->regs.regs[4];
++	u64 x5 = ctxt->regs.regs[5];
++	u64 x6 = ctxt->regs.regs[6];
++	u64 x7 = ctxt->regs.regs[7];
++	u64 x8 = ctxt->regs.regs[8];
++	u64 x9 = ctxt->regs.regs[9];
++
++	u64 x0_expected = 0x0000000000000000;
++	u64 x1_expected = 0x0000000001010101;
++	u64 x2_expected = 0x0000000020202020;
++	u64 x3_expected = 0x0000000003030303;
++	u64 x4_expected = 0x0000000040404040;
++	u64 x5_expected = 0x0000000005050505;
++	u64 x6_expected = 0x0000000060606060;
++	u64 x7_expected = 0x0000000007070707;
++	u64 x8_expected = 0x0000000080808080;
++	u64 x9_expected = 0x0000000009090909;
++
++	if (x0 == x0_expected &&
++	    x1 == x1_expected &&
++	    x2 == x2_expected &&
++	    x3 == x3_expected &&
++	    x4 == x4_expected &&
++	    x5 == x5_expected &&
++	    x6 == x6_expected &&
++	    x7 == x7_expected &&
++	    x8 == x8_expected &&
++	    x9 == x9_expected) {
++
++	    // add the PC by 4 to move to the next instruction,
++	    // and also modify the x0 register value
++	    ctxt->regs.pc += 4;
++	    ctxt->regs.regs[0] = 0x0000000000000001;
++	    printk("modified PC and x0\n");
++	}
++}
++
+ /**
+  * kvm_arch_vcpu_ioctl_run - the main VCPU run function to execute guest code
+  * @vcpu:	The VCPU pointer
+@@ -841,6 +888,10 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
+ 
+ 		kvm_arm_setup_debug(vcpu);
+ 
++		/* check General Purpose Registers (GPRs) and modify PC before entering guest VM */
++		modify_pc(&(vcpu->arch.ctxt));
++
++
+ 		/**************************************************************
+ 		 * Enter the guest
+ 		 */
+@@ -2110,7 +2161,7 @@ int kvm_arch_init(void *opaque)
+ 	} else {
+ 		kvm_info("Hyp mode initialized successfully\n");
+ 	}
+-
++	printk("this is my KVM B10902078\n");
+ 	return 0;
+ 
+ out_hyp:

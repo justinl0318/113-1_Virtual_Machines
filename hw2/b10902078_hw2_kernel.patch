@@ -1,0 +1,129 @@
+diff --git a/arch/arm64/kvm/mmio.c b/arch/arm64/kvm/mmio.c
+index 3e2d8ba11..ad889eda7 100644
+--- a/arch/arm64/kvm/mmio.c
++++ b/arch/arm64/kvm/mmio.c
+@@ -7,6 +7,7 @@
+ #include <linux/kvm_host.h>
+ #include <asm/kvm_emulate.h>
+ #include <trace/events/kvm.h>
++#include <asm/kvm_pgtable.h>
+ 
+ #include "trace.h"
+ 
+@@ -120,6 +121,8 @@ int kvm_handle_mmio_return(struct kvm_vcpu *vcpu)
+ 	return 0;
+ }
+ 
++static int handle_hide_seek_mmio(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa, bool is_write, u8 *data);
++
+ int io_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
+ {
+ 	struct kvm_run *run = vcpu->run;
+@@ -130,6 +133,43 @@ int io_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
+ 	int len;
+ 	u8 data_buf[8];
+ 
++	if (fault_ipa >= 0x0b000000 && fault_ipa <= 0x0b000002) {
++		is_write = kvm_vcpu_dabt_iswrite(vcpu);
++		len = kvm_vcpu_dabt_get_as(vcpu);
++
++		printk("MMIO to HIDE and SEEK register detected, len: %d\n", len);
++
++		if (len != 1) { // only allow one byte access
++			printk("more than one byte being read/write, ERROR\n");
++			return -EINVAL;
++		}
++
++		if (fault_ipa == 0x0b000000 && is_write) {
++			rt = kvm_vcpu_dabt_get_rd(vcpu);
++			data = vcpu_get_reg(vcpu, rt);
++			data_buf[0] = data & 0xFF; // only care about one byte
++
++			ret = handle_hide_seek_mmio(vcpu, fault_ipa, true, &data_buf[0]);
++		}
++		else if (fault_ipa == 0x0b000001 && !is_write) {
++			ret = handle_hide_seek_mmio(vcpu, fault_ipa, false, &data_buf[0]);
++			if (ret == 0) {
++				data = data_buf[0];
++				rt = kvm_vcpu_dabt_get_rd(vcpu);
++				vcpu_set_reg(vcpu, rt, data);
++			}
++		}
++
++		if (ret == 0) {
++			kvm_incr_pc(vcpu);
++			return 1; // handled in KVM (kernel), no need to handle it in userspace(=userland=QEMU)
++		}
++		else {
++			return -EFAULT;
++		}
++	}
++
++
+ 	/*
+ 	 * No valid syndrome? Ask userspace for help if it has
+ 	 * volunteered to do so, and bail out otherwise.
+@@ -193,3 +233,63 @@ int io_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
+ 	run->exit_reason	= KVM_EXIT_MMIO;
+ 	return 0;
+ }
++
++struct hide_seek_data {
++	u8 value; // for storing/reading value
++	bool is_write;
++	bool found; // set to true when we find the target entry
++};
++
++static int hide_seek_walker(u64 addr, u64 end, u32 level, kvm_pte_t *ptep, enum kvm_pgtable_walk_flags flag, void *arg) {
++	struct hide_seek_data *data = arg;
++
++	// only interested in leaf entries mapping 0x40000000
++	if (flag != KVM_PGTABLE_WALK_LEAF || addr != 0x40000000)
++		return 0;
++
++	if (data->is_write) {
++		// clear bits [58:51] and set them to target value
++		*ptep &= ~(0xFFULL << 51);
++		*ptep |= ((u64)data->value << 51);
++	}
++	else{
++		// read bits [58:51]
++		data->value = (*ptep >> 51) & 0xFF;
++	}
++
++	data->found = true;
++	return 0;
++}
++
++static int handle_hide_seek_mmio(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa, bool is_write, u8 *data) {
++	struct hide_seek_data walk_data = {
++                .is_write = is_write,
++                .found = false
++        };
++
++	// setup walk data
++	if (is_write)
++		walk_data.value = *data;
++
++
++	struct kvm_pgtable_walker walker = {
++		.cb = hide_seek_walker,
++		.flags = KVM_PGTABLE_WALK_LEAF,
++		.arg = &walk_data
++	};
++
++	int ret;
++
++	// walk the stage-2 page tables
++	ret = kvm_pgtable_walk(vcpu->kvm->arch.mmu.pgt, 0x40000000, PAGE_SIZE, &walker);
++	if (ret)
++		return ret;
++
++	if (!walk_data.found)
++		return -EFAULT;
++
++	if (!is_write)
++		*data = walk_data.value;
++
++	return 0;
++}
